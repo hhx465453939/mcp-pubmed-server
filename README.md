@@ -71,7 +71,7 @@ ABSTRACT_MODE=quick
 
 ### 步骤五：MCP客户端配置
 
-#### Cline配置：
+#### 1. Cline (VS Code Extension) 配置
 ```json
 {
   "mcpServers": {
@@ -81,31 +81,91 @@ ABSTRACT_MODE=quick
       "cwd": "完整路径/to/mcp-pubmed-server",
       "env": {
         "PUBMED_API_KEY": "你的API密钥",
-        "PUBMED_EMAIL": "你的邮箱"
+        "PUBMED_EMAIL": "你的邮箱地址",
+        "ABSTRACT_MODE": "deep"
       }
     }
   }
 }
 ```
 
-#### Cherry Studio/Windows配置：
+**路径示例：**
+- **Linux/macOS**: `/home/user/mcp-pubmed-server`
+- **Windows**: `C:/Users/YourUser/mcp-pubmed-server`
+
+#### 2. Cherry Studio (Windows) 配置
+```json
+{
+  "mcpServers": {
+    "VBFfGqCFz9AuZJXX2f5GL": {
+      "name": "pubmed-data-server",
+      "type": "stdio",
+      "isActive": true,
+      "command": "node",
+      "args": [
+        "Y:/software/mcp-pubmed-server/src/index.js"
+      ],
+      "env": {
+        "PUBMED_API_KEY": "你的API密钥",
+        "PUBMED_EMAIL": "你的邮箱地址",
+        "ABSTRACT_MODE": "deep"
+      }
+    }
+  }
+}
+```
+
+**Windows 网络映射配置说明：**
+- `Y:/` - Samba 网络驱动器映射路径
+- 也可以使用本地路径如 `C:/mcp-pubmed-server/src/index.js`
+- **注意**: Cherry Studio 不支持 `cwd` 参数
+
+#### 3. Claude Desktop 配置
+编辑 `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS) 或
+`%APPDATA%/Claude/claude_desktop_config.json` (Windows):
+
 ```json
 {
   "mcpServers": {
     "pubmed-data-server": {
       "command": "node",
-      "args": ["E:/fsdownload/mcp-pubmed-server/src/index.js"],
+      "args": ["/mnt/1T/software/mcp-pubmed-server/src/index.js"],
+      "cwd": "/mnt/1T/software/mcp-pubmed-server",
       "env": {
         "PUBMED_API_KEY": "你的API密钥",
-        "PUBMED_EMAIL": "你的邮箱"
+        "PUBMED_EMAIL": "你的邮箱地址",
+        "ABSTRACT_MODE": "deep"
       }
     }
   }
 }
 ```
 
-#### Claude Desktop：
-使用 `config/claude_desktop_config.json` 模板
+**或使用项目内置模板：**
+```bash
+cp config/claude_desktop_config.json.example config/claude_desktop_config.json
+# 编辑配置文件，填入API密钥
+```
+
+#### 4. Claude Code (CLI) 配置
+编辑 `~/.claude/config.json`:
+
+```json
+{
+  "mcpServers": {
+    "pubmed-data-server": {
+      "command": "node",
+      "args": ["/mnt/1T/software/mcp-pubmed-server/src/index.js"],
+      "cwd": "/mnt/1T/software/mcp-pubmed-server",
+      "env": {
+        "PUBMED_API_KEY": "你的API密钥",
+        "PUBMED_EMAIL": "你的邮箱地址",
+        "ABSTRACT_MODE": "deep"
+      }
+    }
+  }
+}
+```
 
 ### 步骤六：验证集成
 在客户端中测试：`使用pubmed_search工具搜索"acupuncture"`
