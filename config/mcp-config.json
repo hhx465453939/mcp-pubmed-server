@@ -12,7 +12,8 @@
       "cwd": ".",
       "env": {
         "PUBMED_API_KEY": "your_pubmed_api_key_here",
-        "PUBMED_EMAIL": "your_email@example.com"
+        "PUBMED_EMAIL": "your_email@example.com",
+        "ABSTRACT_MODE": "deep"
       }
     }
   }

@@ -133,9 +133,9 @@ class PubMedDataServer {
                                 max_abstract_length: {
                                     type: "number",
                                     description: "摘要最大长度（字符）",
-                                    default: 2000,
+                                    default: 5000,
                                     minimum: 500,
-                                    maximum: 5000
+                                    maximum: 6000
                                 }
                             },
                             required: ["pmid"]
@@ -319,7 +319,7 @@ class PubMedDataServer {
 
         const data = await response.json();
 
-        return ids.map(id => {
+        const articles = ids.map(id => {
             const article = data.result[id];
             return {
                 pmid: id,
@@ -330,7 +330,7 @@ class PubMedDataServer {
                 volume: article.volume || '',
                 issue: article.issue || '',
                 pages: article.pages || '',
-                abstract: article.abstract || null,
+                abstract: article.abstract || null, // esummary 可能有截断的摘要
                 doi: article.elocationid || '',
                 url: `https://pubmed.ncbi.nlm.nih.gov/${id}/`,
                 publicationTypes: article.pubtype || [],
@@ -338,6 +338,23 @@ class PubMedDataServer {
                 keywords: article.keywords || []
             };
         });
+
+        // 如果是 deep 模式，尝试获取完整摘要
+        if (ABSTRACT_MODE === 'deep') {
+            for (let article of articles) {
+                try {
+                    // 只有当 esummary 没有摘要或摘要很短时才获取完整摘要
+                    if (!article.abstract || article.abstract.length < 1000) {
+                        article.abstract = await this.fetchFullAbstract(article.pmid);
+                    }
+                } catch (error) {
+                    console.warn(`Failed to fetch full abstract for ${article.pmid}:`, error.message);
+                    // 保留原有的摘要（即使可能不完整）
+                }
+            }
+        }
+
+        return articles;
     }
 
     async fetchFullAbstract(pmid) {
@@ -525,7 +542,7 @@ class PubMedDataServer {
     }
 
     async handleExtractKeyInfo(args) {
-        const { pmid, extract_sections = ["basic_info", "abstract_summary", "authors"], max_abstract_length = 2000 } = args;
+        const { pmid, extract_sections = ["basic_info", "abstract_summary", "authors"], max_abstract_length = ABSTRACT_MAX_CHARS } = args;
 
         const articles = await this.fetchArticleDetails([pmid]);
 
@@ -600,7 +617,9 @@ class PubMedDataServer {
                         extracted_info: extracted,
                         extraction_metadata: {
                             sections: extract_sections,
-                            max_abstract_length: max_abstract_length
+                            max_abstract_length: max_abstract_length,
+                            actual_mode: ABSTRACT_MODE,
+                            actual_max_chars: ABSTRACT_MAX_CHARS
                         }
                     }, null, 2)
                 }
