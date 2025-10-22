@@ -1,6 +1,21 @@
-# PubMed Data Server v2.0
+```
+██████╗ ██╗   ██╗██████╗ ███╗   ███╗███████╗██████╗     ██████╗  █████╗ ████████╗ █████╗ 
+██╔══██╗██║   ██║██╔══██╗████╗ ████║██╔════╝██╔══██╗   ██╔════╝ ██╔══██╗╚══██╔══╝██╔══██╗
+██████╔╝██║   ██║██████╔╝██╔████╔██║█████╗  ██║  ██║   ██║  ███╗███████║   ██║   ███████║
+██╔═══╝ ██║   ██║██╔══██╗██║╚██╔╝██║██╔══╝  ██║  ██║   ██║   ██║██╔══██║   ██║   ██╔══██║
+██║     ╚██████╔╝██████╔╝██║ ╚═╝ ██║███████╗██████╔╝   ╚██████╔╝██║  ██║   ██║   ██║  ██║
+╚═╝      ╚═════╝ ╚═════╝ ╚═╝     ╚═╝╚══════╝╚═════╝     ╚═════╝ ╚═╝  ╚═╝   ╚═╝   ╚═╝  ╚═╝
+```
 
-**极简架构，专注数据提供** - 为LLM提供结构化的PubMed文献数据
+[![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
+[![Version: v2.0](https://img.shields.io/badge/Version-v2.0-brightgreen)](https://github.com/your-repo/mcp-pubmed-server)
+[![MCP Compatible](https://img.shields.io/badge/MCP-Compatible-orange)](https://modelcontextprotocol.io/)
+[![PubMed API](https://img.shields.io/badge/PubMed-API-blue)](https://www.ncbi.nlm.nih.gov/books/NBK25501/)
+[![EndNote Export](https://img.shields.io/badge/EndNote-Export-green)](docs/ENDNOTE_EXPORT.md)
+
+# 🧬 PubMed Data Server v2.0
+
+**🔬 极简架构，专注数据提供** - 为LLM提供结构化的PubMed文献数据
 
 ---
 
@@ -67,6 +82,15 @@ PUBMED_EMAIL=你的邮箱地址
 # quick：1500 字符（快速检索，可能不包含完整摘要）
 # deep：6000 字符（深度检索；建议模型上下文窗口 ≥ 120k tokens）
 ABSTRACT_MODE=quick
+# 全文模式：disabled | enabled | auto
+# disabled：禁用全文功能（默认）
+# enabled：启用全文检测，手动下载
+# auto：启用全文检测，自动下载可用的OA论文
+FULLTEXT_MODE=disabled
+# EndNote导出：enabled | disabled
+# enabled：自动导出RIS和BibTeX格式（默认）
+# disabled：禁用EndNote导出
+ENDNOTE_EXPORT=enabled
 ```
 
 ### 步骤五：MCP客户端配置
@@ -82,7 +106,8 @@ ABSTRACT_MODE=quick
       "env": {
         "PUBMED_API_KEY": "你的API密钥",
         "PUBMED_EMAIL": "你的邮箱地址",
-        "ABSTRACT_MODE": "deep"
+        "ABSTRACT_MODE": "deep",
+        "FULLTEXT_MODE": "enabled"
       }
     }
   }
@@ -108,7 +133,8 @@ ABSTRACT_MODE=quick
       "env": {
         "PUBMED_API_KEY": "你的API密钥",
         "PUBMED_EMAIL": "你的邮箱地址",
-        "ABSTRACT_MODE": "deep"
+        "ABSTRACT_MODE": "deep",
+        "FULLTEXT_MODE": "enabled"
       }
     }
   }
@@ -134,7 +160,8 @@ ABSTRACT_MODE=quick
       "env": {
         "PUBMED_API_KEY": "你的API密钥",
         "PUBMED_EMAIL": "你的邮箱地址",
-        "ABSTRACT_MODE": "deep"
+        "ABSTRACT_MODE": "deep",
+        "FULLTEXT_MODE": "enabled"
       }
     }
   }
@@ -160,7 +187,8 @@ cp config/claude_desktop_config.json.example config/claude_desktop_config.json
       "env": {
         "PUBMED_API_KEY": "你的API密钥",
         "PUBMED_EMAIL": "你的邮箱地址",
-        "ABSTRACT_MODE": "deep"
+        "ABSTRACT_MODE": "deep",
+        "FULLTEXT_MODE": "enabled"
       }
     }
   }
@@ -172,7 +200,7 @@ cp config/claude_desktop_config.json.example config/claude_desktop_config.json
 
 ---
 
-## 🛠️ 5个高效工具
+## 🛠️ 11个高效工具
 
 ### 1. `pubmed_search` - 智能文献搜索
 ```json
@@ -216,6 +244,50 @@ cp config/claude_desktop_config.json.example config/claude_desktop_config.json
   "pmids": ["38412345", "38412346", "38412347"],
   "query_format": "llm_optimized",
   "include_abstracts": true
+}
+```
+
+### 6. `pubmed_detect_fulltext` - 检测全文可用性
+```json
+{
+  "pmid": "38412345",
+  "auto_download": false
+}
+```
+
+### 7. `pubmed_download_fulltext` - 下载全文PDF
+```json
+{
+  "pmid": "38412345",
+  "force_download": false
+}
+```
+
+### 8. `pubmed_fulltext_status` - 全文缓存管理
+```json
+{
+  "action": "stats",
+  "pmid": "38412345"
+}
+```
+
+### 9. `pubmed_batch_download` - 批量智能下载
+```json
+{
+  "pmids": ["38412345", "38412346", "38412347"],
+  "human_like": true
+}
+```
+
+### 10. `pubmed_system_check` - 系统环境检测
+```json
+{}
+```
+
+### 11. `pubmed_endnote_status` - EndNote导出管理
+```json
+{
+  "action": "stats"
 }
 ```
 
@@ -326,6 +398,15 @@ mcp-pubmed-server/
 ## 📄 许可证
 
 Apache License 2.0
+
+---
+
+## 📚 详细文档
+
+- **[全文模式与智能下载系统完整指南](docs/FULLTEXT_SMART_DOWNLOAD.md)** - 完整的全文模式和跨平台智能下载使用指南
+- **[EndNote导出功能使用指南](docs/ENDNOTE_EXPORT.md)** - EndNote兼容格式自动导出功能
+- **[配置说明文档](docs/CONFIGURATION.md)** - 环境变量和MCP客户端配置指南
+- **[项目结构说明](.cursor/rules/README.md)** - Cursor规则和项目架构说明
 
 ---
 
