@@ -7,6 +7,8 @@ import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprot
 import fetch from "node-fetch";
 import fs from 'fs';
 import path from 'path';
+import { spawn, exec } from 'child_process';
+import os from 'os';
 
 const PUBMED_BASE_URL = 'https://eutils.ncbi.nlm.nih.gov/entrez/eutils';
 const RATE_LIMIT_DELAY = 334; // PubMed rate limit: 3 requests per second
@@ -24,6 +26,26 @@ const ABSTRACT_MAX_CHARS = ABSTRACT_MODE === 'deep' ? 6000 : 1500;
 const ABSTRACT_MODE_NOTE = ABSTRACT_MODE === 'deep'
     ? 'Deep mode: up to 6000 chars per abstract. Requires large model context (>=120k tokens recommended for batch usage).'
     : 'Quick mode: up to 1500 chars per abstract (may be incomplete). Optimized for fast retrieval.';
+
+// Full-text mode configuration
+const FULLTEXT_MODE = (process.env.FULLTEXT_MODE || 'disabled').toLowerCase();
+const FULLTEXT_ENABLED = FULLTEXT_MODE === 'enabled' || FULLTEXT_MODE === 'auto';
+const FULLTEXT_AUTO_DOWNLOAD = FULLTEXT_MODE === 'auto';
+
+// Full-text cache configuration
+const FULLTEXT_CACHE_DIR = path.join(CACHE_DIR, 'fulltext');
+const PDF_CACHE_EXPIRY = 90 * 24 * 60 * 60 * 1000; // 90天过期
+const MAX_PDF_SIZE = 50 * 1024 * 1024; // 50MB最大PDF大小
+
+// EndNote导出配置
+const ENDNOTE_EXPORT_ENABLED = (process.env.ENDNOTE_EXPORT || 'enabled').toLowerCase() === 'enabled';
+const ENDNOTE_CACHE_DIR = path.join(CACHE_DIR, 'endnote');
+const ENDNOTE_EXPORT_FORMATS = ['ris', 'bibtex']; // 支持的导出格式
+
+// OA detection URLs
+const PMC_BASE_URL = 'https://www.ncbi.nlm.nih.gov/pmc';
+const PMC_API_URL = 'https://www.ncbi.nlm.nih.gov/pmc/oai/oai.cgi';
+const UNPAYWALL_API_URL = 'https://api.unpaywall.org/v2';
 
 class PubMedDataServer {
     constructor() {
@@ -56,6 +78,16 @@ class PubMedDataServer {
         
         // 初始化缓存目录
         this.initCacheDirectories();
+        
+        // 初始化全文模式
+        if (FULLTEXT_ENABLED) {
+            this.initFullTextMode();
+        }
+        
+        // 初始化EndNote导出模式
+        if (ENDNOTE_EXPORT_ENABLED) {
+            this.initEndNoteExport();
+        }
     }
 
     // 初始化缓存目录
@@ -88,6 +120,37 @@ class PubMedDataServer {
             }
         } catch (error) {
             console.error(`[Cache] Error initializing cache directories:`, error.message);
+        }
+    }
+
+    // 初始化全文模式
+    initFullTextMode() {
+        try {
+            if (!fs.existsSync(FULLTEXT_CACHE_DIR)) {
+                fs.mkdirSync(FULLTEXT_CACHE_DIR, { recursive: true });
+                console.error(`[FullText] Created fulltext cache directory: ${FULLTEXT_CACHE_DIR}`);
+            }
+            
+            // 创建全文索引文件
+            const fulltextIndexPath = path.join(FULLTEXT_CACHE_DIR, 'index.json');
+            if (!fs.existsSync(fulltextIndexPath)) {
+                const indexData = {
+                    version: CACHE_VERSION,
+                    created: new Date().toISOString(),
+                    fulltext_papers: {},
+                    stats: {
+                        totalPDFs: 0,
+                        totalSize: 0,
+                        lastCleanup: new Date().toISOString()
+                    }
+                };
+                fs.writeFileSync(fulltextIndexPath, JSON.stringify(indexData, null, 2));
+                console.error(`[FullText] Created fulltext index: ${fulltextIndexPath}`);
+            }
+            
+            console.error(`[FullText] Full-text mode initialized (mode: ${FULLTEXT_MODE})`);
+        } catch (error) {
+            console.error(`[FullText] Error initializing full-text mode:`, error.message);
         }
     }
 
@@ -429,6 +492,107 @@ class PubMedDataServer {
                             },
                             required: ["pmids"]
                         }
+                    },
+                    {
+                        name: "pubmed_detect_fulltext",
+                        description: "检测文献的开放获取状态和全文可用性",
+                        inputSchema: {
+                            type: "object",
+                            properties: {
+                                pmid: {
+                                    type: "string",
+                                    description: "PubMed文献ID"
+                                },
+                                auto_download: {
+                                    type: "boolean",
+                                    description: "是否自动下载可用的全文",
+                                    default: false
+                                }
+                            },
+                            required: ["pmid"]
+                        }
+                    },
+                    {
+                        name: "pubmed_download_fulltext",
+                        description: "下载指定文献的全文PDF（如果可用）",
+                        inputSchema: {
+                            type: "object",
+                            properties: {
+                                pmid: {
+                                    type: "string",
+                                    description: "PubMed文献ID"
+                                },
+                                force_download: {
+                                    type: "boolean",
+                                    description: "是否强制重新下载（即使已缓存）",
+                                    default: false
+                                }
+                            },
+                            required: ["pmid"]
+                        }
+                    },
+                    {
+                        name: "pubmed_fulltext_status",
+                        description: "获取全文缓存状态和统计信息",
+                        inputSchema: {
+                            type: "object",
+                            properties: {
+                                action: {
+                                    type: "string",
+                                    description: "操作类型",
+                                    enum: ["stats", "list", "clean", "clear"],
+                                    default: "stats"
+                                },
+                                pmid: {
+                                    type: "string",
+                                    description: "指定PMID（仅用于list操作）"
+                                }
+                            }
+                        }
+                    },
+                    {
+                        name: "pubmed_batch_download",
+                        description: "批量下载多个文献的全文PDF，支持跨平台智能下载",
+                        inputSchema: {
+                            type: "object",
+                            properties: {
+                                pmids: {
+                                    type: "array",
+                                    items: { type: "string" },
+                                    description: "PMID列表 (最多10个)",
+                                    maxItems: 10
+                                },
+                                human_like: {
+                                    type: "boolean",
+                                    description: "是否使用类人操作模式（随机延迟）",
+                                    default: true
+                                }
+                            },
+                            required: ["pmids"]
+                        }
+                    },
+                    {
+                        name: "pubmed_system_check",
+                        description: "检查系统环境和下载工具可用性",
+                        inputSchema: {
+                            type: "object",
+                            properties: {}
+                        }
+                    },
+                    {
+                        name: "pubmed_endnote_status",
+                        description: "获取EndNote导出状态和统计信息",
+                        inputSchema: {
+                            type: "object",
+                            properties: {
+                                action: {
+                                    type: "string",
+                                    description: "操作类型",
+                                    enum: ["stats", "list", "clean", "clear"],
+                                    default: "stats"
+                                }
+                            }
+                        }
                     }
                 ]
             };
@@ -454,6 +618,18 @@ class PubMedDataServer {
                         return await this.handleCrossReference(args);
                     case "pubmed_batch_query":
                         return await this.handleBatchQuery(args);
+                    case "pubmed_detect_fulltext":
+                        return await this.handleDetectFulltext(args);
+                    case "pubmed_download_fulltext":
+                        return await this.handleDownloadFulltext(args);
+                    case "pubmed_fulltext_status":
+                        return await this.handleFulltextStatus(args);
+                    case "pubmed_batch_download":
+                        return await this.handleBatchDownload(args);
+                    case "pubmed_system_check":
+                        return await this.handleSystemCheck(args);
+                    case "pubmed_endnote_status":
+                        return await this.handleEndNoteStatus(args);
                     default:
                         throw new Error(`Unknown tool: ${name}`);
                 }
@@ -905,6 +1081,17 @@ class PubMedDataServer {
 
             // 格式化为LLM友好的输出
             const formattedArticles = this.formatForLLM(result.articles, "llm_optimized", response_format);
+            
+            // 自动导出到EndNote格式
+            let endnoteExport = null;
+            if (ENDNOTE_EXPORT_ENABLED && result.articles.length > 0) {
+                try {
+                    endnoteExport = await this.autoExportToEndNote(result.articles);
+                    console.error(`[EndNote] Auto-exported ${endnoteExport.exported} papers to EndNote formats`);
+                } catch (error) {
+                    console.error(`[EndNote] Auto-export failed:`, error.message);
+                }
+            }
 
             return {
                 content: [
@@ -926,7 +1113,8 @@ class PubMedDataServer {
                                 response_format: response_format,
                                 is_large_query: isLargeQuery,
                                 performance_note: isLargeQuery ? "Large query detected. Consider using page_size parameter for better performance." : null
-                            }
+                            },
+                            endnote_export: endnoteExport
                         }, null, 2)
                     }
                 ]
@@ -1336,11 +1524,1588 @@ class PubMedDataServer {
         };
     }
 
+    // ==================== 全文模式工具处理方法 ====================
+    
+    async handleDetectFulltext(args) {
+        const { pmid, auto_download = false } = args;
+        
+        if (!FULLTEXT_ENABLED) {
+            return {
+                content: [{
+                    type: "text",
+                    text: JSON.stringify({
+                        success: false,
+                        error: "Full-text mode is not enabled. Set FULLTEXT_MODE=enabled in environment variables.",
+                        fulltext_mode: FULLTEXT_MODE
+                    }, null, 2)
+                }]
+            };
+        }
+        
+        try {
+            // 获取文献基本信息
+            const articles = await this.fetchArticleDetails([pmid]);
+            if (articles.length === 0) {
+                throw new Error(`未找到PMID为 ${pmid} 的文献`);
+            }
+            
+            const article = articles[0];
+            
+            // 检测开放获取状态
+            const oaInfo = await this.detectOpenAccess(article);
+            
+            let downloadResult = null;
+            if (oaInfo.isOpenAccess && (auto_download || FULLTEXT_AUTO_DOWNLOAD)) {
+                // 检查是否已缓存
+                const cached = this.isPDFCached(pmid);
+                if (!cached.cached) {
+                    downloadResult = await this.downloadPDF(pmid, oaInfo.downloadUrl, oaInfo);
+                } else {
+                    downloadResult = {
+                        success: true,
+                        cached: true,
+                        filePath: cached.filePath,
+                        fileSize: cached.fileSize
+                    };
+                }
+            }
+            
+            return {
+                content: [{
+                    type: "text",
+                    text: JSON.stringify({
+                        success: true,
+                        pmid: pmid,
+                        article_info: {
+                            title: article.title,
+                            authors: article.authors.slice(0, 3),
+                            journal: article.journal,
+                            doi: article.doi
+                        },
+                        open_access: {
+                            is_available: oaInfo.isOpenAccess,
+                            sources: oaInfo.sources,
+                            download_url: oaInfo.downloadUrl,
+                            pmcid: oaInfo.pmcid
+                        },
+                        download_result: downloadResult,
+                        fulltext_mode: {
+                            enabled: FULLTEXT_ENABLED,
+                            auto_download: FULLTEXT_AUTO_DOWNLOAD,
+                            requested_auto_download: auto_download
+                        }
+                    }, null, 2)
+                }]
+            };
+            
+        } catch (error) {
+            return {
+                content: [{
+                    type: "text",
+                    text: JSON.stringify({
+                        success: false,
+                        error: error.message,
+                        pmid: pmid
+                    }, null, 2)
+                }]
+            };
+        }
+    }
+    
+    async handleDownloadFulltext(args) {
+        const { pmid, force_download = false } = args;
+        
+        if (!FULLTEXT_ENABLED) {
+            return {
+                content: [{
+                    type: "text",
+                    text: JSON.stringify({
+                        success: false,
+                        error: "Full-text mode is not enabled. Set FULLTEXT_MODE=enabled in environment variables.",
+                        fulltext_mode: FULLTEXT_MODE
+                    }, null, 2)
+                }]
+            };
+        }
+        
+        try {
+            // 检查是否已缓存且不强制下载
+            if (!force_download) {
+                const cached = this.isPDFCached(pmid);
+                if (cached.cached) {
+                    return {
+                        content: [{
+                            type: "text",
+                            text: JSON.stringify({
+                                success: true,
+                                pmid: pmid,
+                                status: "already_cached",
+                                file_path: cached.filePath,
+                                file_size: cached.fileSize,
+                                age_hours: Math.round(cached.age / (1000 * 60 * 60))
+                            }, null, 2)
+                        }]
+                    };
+                }
+            }
+            
+            // 获取文献信息并检测OA状态
+            const articles = await this.fetchArticleDetails([pmid]);
+            if (articles.length === 0) {
+                throw new Error(`未找到PMID为 ${pmid} 的文献`);
+            }
+            
+            const article = articles[0];
+            const oaInfo = await this.detectOpenAccess(article);
+            
+            if (!oaInfo.isOpenAccess) {
+                return {
+                    content: [{
+                        type: "text",
+                        text: JSON.stringify({
+                            success: false,
+                            pmid: pmid,
+                            error: "No open access full-text available",
+                            open_access_sources: oaInfo.sources,
+                            suggestion: "Try checking PMC, Unpaywall, or publisher websites manually"
+                        }, null, 2)
+                    }]
+                };
+            }
+            
+            // 使用智能下载系统
+            const downloadResult = await this.smartDownloadPDF(pmid, oaInfo.downloadUrl, oaInfo);
+            
+            return {
+                content: [{
+                    type: "text",
+                    text: JSON.stringify({
+                        success: downloadResult.success,
+                        pmid: pmid,
+                        download_result: downloadResult,
+                        open_access_info: {
+                            sources: oaInfo.sources,
+                            download_url: oaInfo.downloadUrl,
+                            pmcid: oaInfo.pmcid
+                        }
+                    }, null, 2)
+                }]
+            };
+            
+        } catch (error) {
+            return {
+                content: [{
+                    type: "text",
+                    text: JSON.stringify({
+                        success: false,
+                        error: error.message,
+                        pmid: pmid
+                    }, null, 2)
+                }]
+            };
+        }
+    }
+    
+    async handleFulltextStatus(args) {
+        const { action = "stats", pmid } = args;
+        
+        if (!FULLTEXT_ENABLED) {
+            return {
+                content: [{
+                    type: "text",
+                    text: JSON.stringify({
+                        success: false,
+                        error: "Full-text mode is not enabled",
+                        fulltext_mode: FULLTEXT_MODE
+                    }, null, 2)
+                }]
+            };
+        }
+        
+        try {
+            switch (action) {
+                case "stats":
+                    const statsIndexPath = path.join(FULLTEXT_CACHE_DIR, 'index.json');
+                    let stats = {
+                        fulltext_mode: FULLTEXT_MODE,
+                        enabled: FULLTEXT_ENABLED,
+                        auto_download: FULLTEXT_AUTO_DOWNLOAD,
+                        cache_directory: FULLTEXT_CACHE_DIR,
+                        total_pdfs: 0,
+                        total_size: 0,
+                        last_cleanup: null
+                    };
+                    
+                    if (fs.existsSync(statsIndexPath)) {
+                        const statsIndexData = JSON.parse(fs.readFileSync(statsIndexPath, 'utf8'));
+                        stats = {
+                            ...stats,
+                            total_pdfs: statsIndexData.stats.totalPDFs,
+                            total_size: statsIndexData.stats.totalSize,
+                            last_cleanup: statsIndexData.stats.lastCleanup,
+                            cache_version: statsIndexData.version
+                        };
+                    }
+                    
+                    return {
+                        content: [{
+                            type: "text",
+                            text: JSON.stringify({
+                                success: true,
+                                action: "stats",
+                                stats: stats
+                            }, null, 2)
+                        }]
+                    };
+                    
+                case "list":
+                    const listPath = path.join(FULLTEXT_CACHE_DIR, 'index.json');
+                    if (!fs.existsSync(listPath)) {
+                        return {
+                            content: [{
+                                type: "text",
+                                text: JSON.stringify({
+                                    success: true,
+                                    action: "list",
+                                    papers: [],
+                                    message: "No full-text papers cached"
+                                }, null, 2)
+                            }]
+                        };
+                    }
+                    
+                    const listIndexData = JSON.parse(fs.readFileSync(listPath, 'utf8'));
+                    const papers = pmid ? 
+                        (listIndexData.fulltext_papers[pmid] ? [listIndexData.fulltext_papers[pmid]] : []) :
+                        Object.values(listIndexData.fulltext_papers);
+                    
+                    return {
+                        content: [{
+                            type: "text",
+                            text: JSON.stringify({
+                                success: true,
+                                action: "list",
+                                papers: papers,
+                                total: papers.length
+                            }, null, 2)
+                        }]
+                    };
+                    
+                case "clean":
+                    // 清理过期的PDF文件
+                    let cleaned = 0;
+                    const cleanPath = path.join(FULLTEXT_CACHE_DIR, 'index.json');
+                    if (fs.existsSync(cleanPath)) {
+                        const cleanIndexData = JSON.parse(fs.readFileSync(cleanPath, 'utf8'));
+                        const now = Date.now();
+                        
+                        for (const [pmid, info] of Object.entries(cleanIndexData.fulltext_papers)) {
+                            const pdfPath = path.join(FULLTEXT_CACHE_DIR, `${pmid}.pdf`);
+                            if (fs.existsSync(pdfPath)) {
+                                const stats = fs.statSync(pdfPath);
+                                const age = now - stats.mtime.getTime();
+                                if (age > PDF_CACHE_EXPIRY) {
+                                    fs.unlinkSync(pdfPath);
+                                    delete cleanIndexData.fulltext_papers[pmid];
+                                    cleaned++;
+                                }
+                            }
+                        }
+                        
+                        if (cleaned > 0) {
+                            cleanIndexData.stats.totalPDFs = Object.keys(cleanIndexData.fulltext_papers).length;
+                            cleanIndexData.stats.totalSize = Object.values(cleanIndexData.fulltext_papers)
+                                .reduce((sum, paper) => sum + (paper.fileSize || 0), 0);
+                            cleanIndexData.stats.lastCleanup = new Date().toISOString();
+                            fs.writeFileSync(cleanPath, JSON.stringify(cleanIndexData, null, 2));
+                        }
+                    }
+                    
+                    return {
+                        content: [{
+                            type: "text",
+                            text: JSON.stringify({
+                                success: true,
+                                action: "clean",
+                                cleaned_files: cleaned,
+                                message: `Cleaned ${cleaned} expired PDF files`
+                            }, null, 2)
+                        }]
+                    };
+                    
+                case "clear":
+                    // 清空所有全文缓存
+                    let deleted = 0;
+                    if (fs.existsSync(FULLTEXT_CACHE_DIR)) {
+                        const files = fs.readdirSync(FULLTEXT_CACHE_DIR);
+                        for (const file of files) {
+                            if (file.endsWith('.pdf')) {
+                                fs.unlinkSync(path.join(FULLTEXT_CACHE_DIR, file));
+                                deleted++;
+                            }
+                        }
+                    }
+                    
+                    // 重置索引
+                    const clearIndexPath = path.join(FULLTEXT_CACHE_DIR, 'index.json');
+                    const clearIndexData = {
+                        version: CACHE_VERSION,
+                        created: new Date().toISOString(),
+                        fulltext_papers: {},
+                        stats: {
+                            totalPDFs: 0,
+                            totalSize: 0,
+                            lastCleanup: new Date().toISOString()
+                        }
+                    };
+                    fs.writeFileSync(clearIndexPath, JSON.stringify(clearIndexData, null, 2));
+                    
+                    return {
+                        content: [{
+                            type: "text",
+                            text: JSON.stringify({
+                                success: true,
+                                action: "clear",
+                                deleted_files: deleted,
+                                message: `Cleared all ${deleted} PDF files`
+                            }, null, 2)
+                        }]
+                    };
+                    
+                default:
+                    throw new Error(`Unknown action: ${action}`);
+            }
+            
+        } catch (error) {
+            return {
+                content: [{
+                    type: "text",
+                    text: JSON.stringify({
+                        success: false,
+                        error: error.message,
+                        action: action
+                    }, null, 2)
+                }]
+            };
+        }
+    }
+    
+    // ==================== 新增工具处理方法 ====================
+    
+    async handleBatchDownload(args) {
+        const { pmids, human_like = true } = args;
+        
+        if (!FULLTEXT_ENABLED) {
+            return {
+                content: [{
+                    type: "text",
+                    text: JSON.stringify({
+                        success: false,
+                        error: "Full-text mode is not enabled. Set FULLTEXT_MODE=enabled in environment variables.",
+                        fulltext_mode: FULLTEXT_MODE
+                    }, null, 2)
+                }]
+            };
+        }
+        
+        if (pmids.length > 10) {
+            return {
+                content: [{
+                    type: "text",
+                    text: JSON.stringify({
+                        success: false,
+                        error: "Maximum 10 PMIDs allowed for batch download"
+                    }, null, 2)
+                }]
+            };
+        }
+        
+        try {
+            console.error(`[BatchDownload] Starting batch download for ${pmids.length} papers`);
+            
+            // 构建下载列表
+            const downloadList = [];
+            for (const pmid of pmids) {
+                const articles = await this.fetchArticleDetails([pmid]);
+                if (articles.length > 0) {
+                    const article = articles[0];
+                    const oaInfo = await this.detectOpenAccess(article);
+                    
+                    if (oaInfo.isOpenAccess) {
+                        downloadList.push({
+                            pmid: pmid,
+                            title: article.title,
+                            downloadUrl: oaInfo.downloadUrl,
+                            oaInfo: oaInfo
+                        });
+                    }
+                }
+            }
+            
+            if (downloadList.length === 0) {
+                return {
+                    content: [{
+                        type: "text",
+                        text: JSON.stringify({
+                            success: true,
+                            message: "No open access papers found for download",
+                            total_requested: pmids.length,
+                            available_for_download: 0
+                        }, null, 2)
+                    }]
+                };
+            }
+            
+            // 执行批量下载
+            const results = await this.batchDownloadPDFs(downloadList);
+            
+            // 统计结果
+            const successful = results.filter(r => r.result.success);
+            const failed = results.filter(r => !r.result.success);
+            
+            return {
+                content: [{
+                    type: "text",
+                    text: JSON.stringify({
+                        success: true,
+                        batch_download: {
+                            total_requested: pmids.length,
+                            available_for_download: downloadList.length,
+                            successful_downloads: successful.length,
+                            failed_downloads: failed.length
+                        },
+                        results: results,
+                        human_like_mode: human_like,
+                        system_info: this.detectSystemEnvironment()
+                    }, null, 2)
+                }]
+            };
+            
+        } catch (error) {
+            return {
+                content: [{
+                    type: "text",
+                    text: JSON.stringify({
+                        success: false,
+                        error: error.message,
+                        pmids: pmids
+                    }, null, 2)
+                }]
+            };
+        }
+    }
+    
+    async handleSystemCheck(args) {
+        try {
+            const systemInfo = await this.checkDownloadTools();
+            
+            return {
+                content: [{
+                    type: "text",
+                    text: JSON.stringify({
+                        success: true,
+                        system_environment: systemInfo,
+                        fulltext_mode: {
+                            enabled: FULLTEXT_ENABLED,
+                            mode: FULLTEXT_MODE,
+                            auto_download: FULLTEXT_AUTO_DOWNLOAD
+                        },
+                        recommendations: this.getSystemRecommendations(systemInfo)
+                    }, null, 2)
+                }]
+            };
+            
+        } catch (error) {
+            return {
+                content: [{
+                    type: "text",
+                    text: JSON.stringify({
+                        success: false,
+                        error: error.message
+                    }, null, 2)
+                }]
+            };
+        }
+    }
+    
+    // 获取系统建议
+    getSystemRecommendations(systemInfo) {
+        const recommendations = [];
+        
+        if (systemInfo.system.isWindows) {
+            const powershell = systemInfo.tools.find(t => t.name === 'PowerShell');
+            if (powershell && powershell.available) {
+                recommendations.push("✅ PowerShell available - Windows downloads will use Invoke-WebRequest");
+            } else {
+                recommendations.push("❌ PowerShell not available - Windows downloads may fail");
+            }
+        } else {
+            const wget = systemInfo.tools.find(t => t.name === 'wget');
+            const curl = systemInfo.tools.find(t => t.name === 'curl');
+            
+            if (wget && wget.available) {
+                recommendations.push("✅ wget available - Recommended for Linux/macOS downloads");
+            } else if (curl && curl.available) {
+                recommendations.push("✅ curl available - Will use curl as fallback");
+            } else {
+                recommendations.push("❌ Neither wget nor curl available - Downloads may fail");
+            }
+        }
+        
+        if (FULLTEXT_ENABLED) {
+            recommendations.push("✅ Full-text mode enabled");
+        } else {
+            recommendations.push("⚠️ Full-text mode disabled - Enable with FULLTEXT_MODE=enabled");
+        }
+        
+        return recommendations;
+    }
+    
+    // ==================== EndNote状态管理方法 ====================
+    
+    async handleEndNoteStatus(args) {
+        const { action = "stats" } = args;
+        
+        try {
+            switch (action) {
+                case "stats":
+                    const status = this.getEndNoteExportStatus();
+                    return {
+                        content: [{
+                            type: "text",
+                            text: JSON.stringify({
+                                success: true,
+                                action: "stats",
+                                endnote_export: status
+                            }, null, 2)
+                        }]
+                    };
+                    
+                case "list":
+                    const indexPath = path.join(ENDNOTE_CACHE_DIR, 'index.json');
+                    if (!fs.existsSync(indexPath)) {
+                        return {
+                            content: [{
+                                type: "text",
+                                text: JSON.stringify({
+                                    success: true,
+                                    action: "list",
+                                    exported_papers: [],
+                                    message: "No EndNote exports found"
+                                }, null, 2)
+                            }]
+                        };
+                    }
+                    
+                    const indexData = JSON.parse(fs.readFileSync(indexPath, 'utf8'));
+                    const papers = Object.values(indexData.exported_papers);
+                    
+                    return {
+                        content: [{
+                            type: "text",
+                            text: JSON.stringify({
+                                success: true,
+                                action: "list",
+                                exported_papers: papers,
+                                total: papers.length
+                            }, null, 2)
+                        }]
+                    };
+                    
+                case "clean":
+                    // 清理过期的导出文件
+                    let cleaned = 0;
+                    const cleanPath = path.join(ENDNOTE_CACHE_DIR, 'index.json');
+                    if (fs.existsSync(cleanPath)) {
+                        const indexData = JSON.parse(fs.readFileSync(cleanPath, 'utf8'));
+                        const now = Date.now();
+                        const fileExpiry = 30 * 24 * 60 * 60 * 1000; // 30天过期
+                        
+                        for (const [pmid, info] of Object.entries(indexData.exported_papers)) {
+                            const exportTime = new Date(info.exported).getTime();
+                            const age = now - exportTime;
+                            
+                            if (age > fileExpiry) {
+                                // 删除相关文件
+                                const risFile = path.join(ENDNOTE_CACHE_DIR, `${pmid}.ris`);
+                                const bibFile = path.join(ENDNOTE_CACHE_DIR, `${pmid}.bib`);
+                                
+                                if (fs.existsSync(risFile)) {
+                                    fs.unlinkSync(risFile);
+                                }
+                                if (fs.existsSync(bibFile)) {
+                                    fs.unlinkSync(bibFile);
+                                }
+                                
+                                delete indexData.exported_papers[pmid];
+                                cleaned++;
+                            }
+                        }
+                        
+                        if (cleaned > 0) {
+                            indexData.stats.totalExports = Object.keys(indexData.exported_papers).length;
+                            indexData.stats.lastCleanup = new Date().toISOString();
+                            fs.writeFileSync(cleanPath, JSON.stringify(indexData, null, 2));
+                        }
+                    }
+                    
+                    return {
+                        content: [{
+                            type: "text",
+                            text: JSON.stringify({
+                                success: true,
+                                action: "clean",
+                                message: `Cleaned ${cleaned} expired EndNote export files`
+                            }, null, 2)
+                        }]
+                    };
+                    
+                case "clear":
+                    // 清空所有EndNote导出文件
+                    let deleted = 0;
+                    if (fs.existsSync(ENDNOTE_CACHE_DIR)) {
+                        const files = fs.readdirSync(ENDNOTE_CACHE_DIR);
+                        for (const file of files) {
+                            if (file.endsWith('.ris') || file.endsWith('.bib')) {
+                                fs.unlinkSync(path.join(ENDNOTE_CACHE_DIR, file));
+                                deleted++;
+                            }
+                        }
+                    }
+                    
+                    // 重置索引
+                    const clearIndexPath = path.join(ENDNOTE_CACHE_DIR, 'index.json');
+                    const clearIndexData = {
+                        version: CACHE_VERSION,
+                        created: new Date().toISOString(),
+                        exported_papers: {},
+                        stats: {
+                            totalExports: 0,
+                            risFiles: 0,
+                            bibtexFiles: 0,
+                            lastExport: null
+                        }
+                    };
+                    fs.writeFileSync(clearIndexPath, JSON.stringify(clearIndexData, null, 2));
+                    
+                    return {
+                        content: [{
+                            type: "text",
+                            text: JSON.stringify({
+                                success: true,
+                                action: "clear",
+                                message: `Cleared ${deleted} EndNote export files`
+                            }, null, 2)
+                        }]
+                    };
+                    
+                default:
+                    return {
+                        content: [{
+                            type: "text",
+                            text: JSON.stringify({
+                                success: false,
+                                error: `Unknown action: ${action}`,
+                                action: action
+                            }, null, 2)
+                        }]
+                    };
+            }
+            
+        } catch (error) {
+            return {
+                content: [{
+                    type: "text",
+                    text: JSON.stringify({
+                        success: false,
+                        error: error.message,
+                        action: action
+                    }, null, 2)
+                }]
+            };
+        }
+    }
+    
+    // ==================== EndNote导出核心方法 ====================
+    
+    // 初始化EndNote导出模式
+    initEndNoteExport() {
+        try {
+            if (!fs.existsSync(ENDNOTE_CACHE_DIR)) {
+                fs.mkdirSync(ENDNOTE_CACHE_DIR, { recursive: true });
+                console.error(`[EndNote] Created endnote export directory: ${ENDNOTE_CACHE_DIR}`);
+            }
+            
+            // 创建EndNote导出索引文件
+            const endnoteIndexPath = path.join(ENDNOTE_CACHE_DIR, 'index.json');
+            if (!fs.existsSync(endnoteIndexPath)) {
+                const indexData = {
+                    version: CACHE_VERSION,
+                    created: new Date().toISOString(),
+                    exported_papers: {},
+                    stats: {
+                        totalExports: 0,
+                        risFiles: 0,
+                        bibtexFiles: 0,
+                        lastExport: null
+                    }
+                };
+                fs.writeFileSync(endnoteIndexPath, JSON.stringify(indexData, null, 2));
+                console.error(`[EndNote] Created endnote export index: ${endnoteIndexPath}`);
+            }
+            
+            console.error(`[EndNote] EndNote export mode initialized`);
+        } catch (error) {
+            console.error(`[EndNote] Error initializing EndNote export mode:`, error.message);
+        }
+    }
+    
+    // 自动导出论文到EndNote格式
+    async autoExportToEndNote(articles) {
+        if (!ENDNOTE_EXPORT_ENABLED) {
+            return { success: false, message: "EndNote export is disabled" };
+        }
+        
+        try {
+            const exportResults = [];
+            
+            for (const article of articles) {
+                const exportResult = await this.exportArticleToEndNote(article);
+                exportResults.push(exportResult);
+            }
+            
+            // 更新导出索引
+            await this.updateEndNoteIndex(exportResults);
+            
+            return {
+                success: true,
+                exported: exportResults.filter(r => r.success).length,
+                failed: exportResults.filter(r => !r.success).length,
+                results: exportResults
+            };
+            
+        } catch (error) {
+            console.error(`[EndNote] Error in auto export:`, error.message);
+            return { success: false, error: error.message };
+        }
+    }
+    
+    // 导出单篇论文到EndNote格式
+    async exportArticleToEndNote(article) {
+        try {
+            const pmid = article.pmid;
+            const exportResults = {};
+            
+            // 导出RIS格式
+            const risContent = this.generateRIS(article);
+            const risFilePath = path.join(ENDNOTE_CACHE_DIR, `${pmid}.ris`);
+            fs.writeFileSync(risFilePath, risContent, 'utf8');
+            exportResults.ris = { success: true, filePath: risFilePath };
+            
+            // 导出BibTeX格式
+            const bibtexContent = this.generateBibTeX(article);
+            const bibtexFilePath = path.join(ENDNOTE_CACHE_DIR, `${pmid}.bib`);
+            fs.writeFileSync(bibtexFilePath, bibtexContent, 'utf8');
+            exportResults.bibtex = { success: true, filePath: bibtexFilePath };
+            
+            console.error(`[EndNote] Exported ${pmid} to RIS and BibTeX formats`);
+            
+            return {
+                pmid: pmid,
+                title: article.title,
+                success: true,
+                formats: exportResults,
+                exported: new Date().toISOString()
+            };
+            
+        } catch (error) {
+            console.error(`[EndNote] Error exporting ${article.pmid}:`, error.message);
+            return {
+                pmid: article.pmid,
+                title: article.title,
+                success: false,
+                error: error.message
+            };
+        }
+    }
+    
+    // 生成RIS格式
+    generateRIS(article) {
+        const ris = [];
+        
+        // RIS格式头部
+        ris.push('TY  - JOUR');
+        
+        // 标题
+        if (article.title) {
+            ris.push(`TI  - ${article.title}`);
+        }
+        
+        // 作者
+        if (article.authors && article.authors.length > 0) {
+            article.authors.forEach(author => {
+                ris.push(`AU  - ${author}`);
+            });
+        }
+        
+        // 期刊
+        if (article.journal) {
+            ris.push(`T2  - ${article.journal}`);
+        }
+        
+        // 发表日期
+        if (article.pubDate) {
+            ris.push(`PY  - ${article.pubDate}`);
+        }
+        
+        // 卷号
+        if (article.volume) {
+            ris.push(`VL  - ${article.volume}`);
+        }
+        
+        // 期号
+        if (article.issue) {
+            ris.push(`IS  - ${article.issue}`);
+        }
+        
+        // 页码
+        if (article.pages) {
+            ris.push(`SP  - ${article.pages}`);
+        }
+        
+        // DOI
+        if (article.doi) {
+            ris.push(`DO  - ${article.doi}`);
+        }
+        
+        // PMID
+        if (article.pmid) {
+            ris.push(`PMID - ${article.pmid}`);
+        }
+        
+        // PMC ID
+        if (article.pmcid) {
+            ris.push(`PMC - ${article.pmcid}`);
+        }
+        
+        // 摘要
+        if (article.abstract) {
+            ris.push(`AB  - ${article.abstract}`);
+        }
+        
+        // 关键词
+        if (article.keywords && article.keywords.length > 0) {
+            article.keywords.forEach(keyword => {
+                ris.push(`KW  - ${keyword}`);
+            });
+        }
+        
+        // URL
+        if (article.url) {
+            ris.push(`UR  - ${article.url}`);
+        }
+        
+        // 语言
+        ris.push('LA  - eng');
+        
+        // 数据库
+        ris.push('DB  - PubMed');
+        
+        // RIS格式尾部
+        ris.push('ER  - ');
+        ris.push('');
+        
+        return ris.join('\n');
+    }
+    
+    // 生成BibTeX格式
+    generateBibTeX(article) {
+        const pmid = article.pmid;
+        const firstAuthor = article.authors && article.authors.length > 0 
+            ? article.authors[0].replace(/\s+/g, '').toLowerCase() 
+            : 'unknown';
+        const year = article.pubDate ? article.pubDate.split('-')[0] : 'unknown';
+        const citeKey = `${firstAuthor}${year}${pmid}`;
+        
+        const bibtex = [];
+        bibtex.push(`@article{${citeKey},`);
+        bibtex.push(`  title = {${article.title || 'Unknown Title'}},`);
+        
+        if (article.authors && article.authors.length > 0) {
+            bibtex.push(`  author = {${article.authors.join(' and ')}},`);
+        }
+        
+        if (article.journal) {
+            bibtex.push(`  journal = {${article.journal}},`);
+        }
+        
+        if (article.pubDate) {
+            bibtex.push(`  year = {${article.pubDate}},`);
+        }
+        
+        if (article.volume) {
+            bibtex.push(`  volume = {${article.volume}},`);
+        }
+        
+        if (article.issue) {
+            bibtex.push(`  number = {${article.issue}},`);
+        }
+        
+        if (article.pages) {
+            bibtex.push(`  pages = {${article.pages}},`);
+        }
+        
+        if (article.doi) {
+            bibtex.push(`  doi = {${article.doi}},`);
+        }
+        
+        if (article.pmid) {
+            bibtex.push(`  pmid = {${article.pmid}},`);
+        }
+        
+        if (article.pmcid) {
+            bibtex.push(`  pmcid = {${article.pmcid}},`);
+        }
+        
+        if (article.abstract) {
+            bibtex.push(`  abstract = {${article.abstract}},`);
+        }
+        
+        bibtex.push(`  publisher = {PubMed},`);
+        bibtex.push(`  url = {https://pubmed.ncbi.nlm.nih.gov/${pmid}/},`);
+        bibtex.push(`}`);
+        bibtex.push('');
+        
+        return bibtex.join('\n');
+    }
+    
+    // 更新EndNote导出索引
+    async updateEndNoteIndex(exportResults) {
+        try {
+            const indexPath = path.join(ENDNOTE_CACHE_DIR, 'index.json');
+            const indexData = JSON.parse(fs.readFileSync(indexPath, 'utf8'));
+            
+            // 更新导出记录
+            exportResults.forEach(result => {
+                if (result.success) {
+                    indexData.exported_papers[result.pmid] = {
+                        pmid: result.pmid,
+                        title: result.title,
+                        formats: result.formats,
+                        exported: result.exported
+                    };
+                }
+            });
+            
+            // 更新统计信息
+            indexData.stats.totalExports = Object.keys(indexData.exported_papers).length;
+            indexData.stats.risFiles = Object.values(indexData.exported_papers)
+                .filter(paper => paper.formats && paper.formats.ris && paper.formats.ris.success).length;
+            indexData.stats.bibtexFiles = Object.values(indexData.exported_papers)
+                .filter(paper => paper.formats && paper.formats.bibtex && paper.formats.bibtex.success).length;
+            indexData.stats.lastExport = new Date().toISOString();
+            
+            fs.writeFileSync(indexPath, JSON.stringify(indexData, null, 2));
+            
+        } catch (error) {
+            console.error(`[EndNote] Error updating export index:`, error.message);
+        }
+    }
+    
+    // 获取EndNote导出状态
+    getEndNoteExportStatus() {
+        try {
+            const indexPath = path.join(ENDNOTE_CACHE_DIR, 'index.json');
+            if (!fs.existsSync(indexPath)) {
+                return {
+                    enabled: ENDNOTE_EXPORT_ENABLED,
+                    directory: ENDNOTE_CACHE_DIR,
+                    totalExports: 0,
+                    risFiles: 0,
+                    bibtexFiles: 0,
+                    lastExport: null
+                };
+            }
+            
+            const indexData = JSON.parse(fs.readFileSync(indexPath, 'utf8'));
+            return {
+                enabled: ENDNOTE_EXPORT_ENABLED,
+                directory: ENDNOTE_CACHE_DIR,
+                totalExports: indexData.stats.totalExports,
+                risFiles: indexData.stats.risFiles,
+                bibtexFiles: indexData.stats.bibtexFiles,
+                lastExport: indexData.stats.lastExport,
+                supportedFormats: ENDNOTE_EXPORT_FORMATS
+            };
+            
+        } catch (error) {
+            console.error(`[EndNote] Error getting export status:`, error.message);
+            return {
+                enabled: ENDNOTE_EXPORT_ENABLED,
+                error: error.message
+            };
+        }
+    }
+
+    // ==================== 全文模式核心方法 ====================
+    
+    // 检测OA论文和全文可用性
+    async detectOpenAccess(article) {
+        const oaInfo = {
+            isOpenAccess: false,
+            sources: [],
+            downloadUrl: null,
+            pmcid: null,
+            doi: article.doi
+        };
+        
+        try {
+            // 1. 检查PMC免费全文
+            if (article.pmcid || article.publicationTypes?.includes('PMC')) {
+                const pmcInfo = await this.checkPMCContent(article.pmid);
+                if (pmcInfo.isAvailable) {
+                    oaInfo.isOpenAccess = true;
+                    oaInfo.sources.push('PMC');
+                    oaInfo.downloadUrl = pmcInfo.downloadUrl;
+                    oaInfo.pmcid = pmcInfo.pmcid;
+                }
+            }
+            
+            // 2. 检查DOI的Unpaywall
+            if (article.doi && !oaInfo.isOpenAccess) {
+                const unpaywallInfo = await this.checkUnpaywall(article.doi);
+                if (unpaywallInfo.isOpenAccess) {
+                    oaInfo.isOpenAccess = true;
+                    oaInfo.sources.push('Unpaywall');
+                    oaInfo.downloadUrl = unpaywallInfo.downloadUrl;
+                }
+            }
+            
+            // 3. 检查出版商直接OA
+            if (!oaInfo.isOpenAccess && article.doi) {
+                const publisherInfo = await this.checkPublisherOA(article.doi);
+                if (publisherInfo.isOpenAccess) {
+                    oaInfo.isOpenAccess = true;
+                    oaInfo.sources.push('Publisher');
+                    oaInfo.downloadUrl = publisherInfo.downloadUrl;
+                }
+            }
+            
+        } catch (error) {
+            console.error(`[FullText] Error detecting OA for ${article.pmid}:`, error.message);
+        }
+        
+        return oaInfo;
+    }
+    
+    // 检查PMC内容
+    async checkPMCContent(pmid) {
+        try {
+            const pmcUrl = `${PMC_BASE_URL}/?term=${pmid}`;
+            const response = await fetch(pmcUrl, { timeout: REQUEST_TIMEOUT });
+            
+            if (response.ok) {
+                const html = await response.text();
+                // 检查是否有PMC免费全文
+                const pmcMatch = html.match(/PMC(\d+)/);
+                if (pmcMatch) {
+                    const pmcid = `PMC${pmcMatch[1]}`;
+                    return {
+                        isAvailable: true,
+                        pmcid: pmcid,
+                        downloadUrl: `${PMC_BASE_URL}/articles/${pmcid}/pdf/`
+                    };
+                }
+            }
+        } catch (error) {
+            console.error(`[FullText] Error checking PMC for ${pmid}:`, error.message);
+        }
+        
+        return { isAvailable: false };
+    }
+    
+    // 检查Unpaywall
+    async checkUnpaywall(doi) {
+        try {
+            const unpaywallUrl = `${UNPAYWALL_API_URL}/${doi}?email=${process.env.PUBMED_EMAIL || 'user@example.com'}`;
+            const response = await fetch(unpaywallUrl, { timeout: REQUEST_TIMEOUT });
+            
+            if (response.ok) {
+                const data = await response.json();
+                if (data.is_oa && data.best_oa_location) {
+                    return {
+                        isOpenAccess: true,
+                        downloadUrl: data.best_oa_location.url,
+                        source: data.best_oa_location.source
+                    };
+                }
+            }
+        } catch (error) {
+            console.error(`[FullText] Error checking Unpaywall for ${doi}:`, error.message);
+        }
+        
+        return { isOpenAccess: false };
+    }
+    
+    // 检查出版商直接OA
+    async checkPublisherOA(doi) {
+        try {
+            const doiUrl = `https://doi.org/${doi}`;
+            const response = await fetch(doiUrl, { 
+                timeout: REQUEST_TIMEOUT,
+                headers: {
+                    'User-Agent': 'Mozilla/5.0 (compatible; PubMed-MCP-Server/2.0)'
+                }
+            });
+            
+            if (response.ok) {
+                const html = await response.text();
+                // 检查是否有免费PDF链接
+                const pdfMatch = html.match(/href="([^"]*\.pdf[^"]*)"/i);
+                if (pdfMatch) {
+                    return {
+                        isOpenAccess: true,
+                        downloadUrl: pdfMatch[1]
+                    };
+                }
+            }
+        } catch (error) {
+            console.error(`[FullText] Error checking publisher OA for ${doi}:`, error.message);
+        }
+        
+        return { isOpenAccess: false };
+    }
+    
+    // 下载PDF文件
+    async downloadPDF(pmid, downloadUrl, oaInfo) {
+        try {
+            console.error(`[FullText] Downloading PDF for ${pmid} from ${oaInfo.sources.join(', ')}`);
+            
+            const response = await fetch(downloadUrl, {
+                timeout: 60000, // 60秒超时
+                headers: {
+                    'User-Agent': 'Mozilla/5.0 (compatible; PubMed-MCP-Server/2.0)',
+                    'Accept': 'application/pdf,text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
+                }
+            });
+            
+            if (!response.ok) {
+                throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+            }
+            
+            const contentLength = response.headers.get('content-length');
+            if (contentLength && parseInt(contentLength) > MAX_PDF_SIZE) {
+                throw new Error(`PDF too large: ${contentLength} bytes (max: ${MAX_PDF_SIZE})`);
+            }
+            
+            const buffer = await response.buffer();
+            if (buffer.length > MAX_PDF_SIZE) {
+                throw new Error(`PDF too large: ${buffer.length} bytes (max: ${MAX_PDF_SIZE})`);
+            }
+            
+            // 保存PDF文件
+            const pdfPath = path.join(FULLTEXT_CACHE_DIR, `${pmid}.pdf`);
+            fs.writeFileSync(pdfPath, buffer);
+            
+            // 更新全文索引
+            await this.updateFullTextIndex(pmid, {
+                pmid: pmid,
+                downloadUrl: downloadUrl,
+                sources: oaInfo.sources,
+                filePath: `${pmid}.pdf`,
+                fileSize: buffer.length,
+                downloaded: new Date().toISOString(),
+                pmcid: oaInfo.pmcid,
+                doi: oaInfo.doi
+            });
+            
+            console.error(`[FullText] PDF downloaded successfully: ${pmid} (${buffer.length} bytes)`);
+            return {
+                success: true,
+                filePath: pdfPath,
+                fileSize: buffer.length,
+                sources: oaInfo.sources
+            };
+            
+        } catch (error) {
+            console.error(`[FullText] Error downloading PDF for ${pmid}:`, error.message);
+            return {
+                success: false,
+                error: error.message
+            };
+        }
+    }
+    
+    // 更新全文索引
+    async updateFullTextIndex(pmid, fulltextInfo) {
+        try {
+            const indexPath = path.join(FULLTEXT_CACHE_DIR, 'index.json');
+            const indexData = JSON.parse(fs.readFileSync(indexPath, 'utf8'));
+            
+            indexData.fulltext_papers[pmid] = {
+                ...fulltextInfo,
+                cached: new Date().toISOString()
+            };
+            
+            indexData.stats.totalPDFs = Object.keys(indexData.fulltext_papers).length;
+            indexData.stats.totalSize = Object.values(indexData.fulltext_papers)
+                .reduce((sum, paper) => sum + (paper.fileSize || 0), 0);
+            
+            fs.writeFileSync(indexPath, JSON.stringify(indexData, null, 2));
+            
+        } catch (error) {
+            console.error(`[FullText] Error updating fulltext index:`, error.message);
+        }
+    }
+    
+    // 检查PDF是否已缓存
+    isPDFCached(pmid) {
+        try {
+            const pdfPath = path.join(FULLTEXT_CACHE_DIR, `${pmid}.pdf`);
+            if (fs.existsSync(pdfPath)) {
+                const stats = fs.statSync(pdfPath);
+                const age = Date.now() - stats.mtime.getTime();
+                if (age < PDF_CACHE_EXPIRY) {
+                    return {
+                        cached: true,
+                        filePath: pdfPath,
+                        fileSize: stats.size,
+                        age: age
+                    };
+                } else {
+                    // 删除过期文件
+                    fs.unlinkSync(pdfPath);
+                    return { cached: false };
+                }
+            }
+        } catch (error) {
+            console.error(`[FullText] Error checking PDF cache for ${pmid}:`, error.message);
+        }
+        
+        return { cached: false };
+    }
+    
+    // 获取PDF文本内容（简单实现）
+    async extractPDFText(pmid) {
+        try {
+            const pdfPath = path.join(FULLTEXT_CACHE_DIR, `${pmid}.pdf`);
+            if (!fs.existsSync(pdfPath)) {
+                return null;
+            }
+            
+            // 这里可以集成PDF解析库如pdf-parse
+            // 为了简化，先返回基本信息
+            const stats = fs.statSync(pdfPath);
+            return {
+                pmid: pmid,
+                filePath: pdfPath,
+                fileSize: stats.size,
+                extracted: false, // 需要PDF解析库
+                note: "PDF text extraction requires additional library (pdf-parse)"
+            };
+            
+        } catch (error) {
+            console.error(`[FullText] Error extracting PDF text for ${pmid}:`, error.message);
+            return null;
+        }
+    }
+
+    // ==================== 跨平台智能下载系统 ====================
+    
+    // 检测系统环境
+    detectSystemEnvironment() {
+        const platform = os.platform();
+        const arch = os.arch();
+        
+        return {
+            platform: platform,
+            arch: arch,
+            isWindows: platform === 'win32',
+            isMacOS: platform === 'darwin',
+            isLinux: platform === 'linux',
+            downloadCommand: this.getDownloadCommand(platform),
+            userAgent: this.getUserAgent(platform)
+        };
+    }
+    
+    // 获取下载命令
+    getDownloadCommand(platform) {
+        switch (platform) {
+            case 'win32':
+                return 'powershell'; // 使用PowerShell的Invoke-WebRequest
+            case 'darwin':
+            case 'linux':
+                return 'wget'; // 优先使用wget
+            default:
+                return 'curl'; // 备用方案
+        }
+    }
+    
+    // 获取用户代理
+    getUserAgent(platform) {
+        const userAgents = {
+            'win32': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'darwin': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'linux': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+        };
+        return userAgents[platform] || userAgents['linux'];
+    }
+    
+    // 智能下载PDF（跨平台）
+    async smartDownloadPDF(pmid, downloadUrl, oaInfo) {
+        const system = this.detectSystemEnvironment();
+        const downloadDir = FULLTEXT_CACHE_DIR;
+        const filename = `${pmid}.pdf`;
+        const filePath = path.join(downloadDir, filename);
+        
+        console.error(`[SmartDownload] Starting download for ${pmid} on ${system.platform}`);
+        console.error(`[SmartDownload] URL: ${downloadUrl}`);
+        console.error(`[SmartDownload] Command: ${system.downloadCommand}`);
+        
+        try {
+            let downloadResult;
+            
+            if (system.isWindows) {
+                downloadResult = await this.downloadWithPowerShell(downloadUrl, filePath, system);
+            } else {
+                downloadResult = await this.downloadWithWgetOrCurl(downloadUrl, filePath, system);
+            }
+            
+            if (downloadResult.success) {
+                // 更新全文索引
+                await this.updateFullTextIndex(pmid, {
+                    pmid: pmid,
+                    downloadUrl: downloadUrl,
+                    sources: oaInfo.sources,
+                    filePath: filename,
+                    fileSize: downloadResult.fileSize,
+                    downloaded: new Date().toISOString(),
+                    pmcid: oaInfo.pmcid,
+                    doi: oaInfo.doi,
+                    downloadMethod: system.downloadCommand
+                });
+                
+                console.error(`[SmartDownload] Successfully downloaded ${pmid} (${downloadResult.fileSize} bytes)`);
+            }
+            
+            return downloadResult;
+            
+        } catch (error) {
+            console.error(`[SmartDownload] Error downloading ${pmid}:`, error.message);
+            return {
+                success: false,
+                error: error.message,
+                pmid: pmid
+            };
+        }
+    }
+    
+    // Windows PowerShell下载
+    async downloadWithPowerShell(downloadUrl, filePath, system) {
+        return new Promise((resolve) => {
+            const command = `powershell -Command "& {Invoke-WebRequest -Uri '${downloadUrl}' -OutFile '${filePath}' -UserAgent '${system.userAgent}' -TimeoutSec 60}"`;
+            
+            console.error(`[PowerShell] Executing: ${command}`);
+            
+            exec(command, (error, stdout, stderr) => {
+                if (error) {
+                    console.error(`[PowerShell] Error: ${error.message}`);
+                    resolve({
+                        success: false,
+                        error: error.message,
+                        stderr: stderr
+                    });
+                    return;
+                }
+                
+                // 检查文件是否下载成功
+                if (fs.existsSync(filePath)) {
+                    const stats = fs.statSync(filePath);
+                    if (stats.size > 0) {
+                        resolve({
+                            success: true,
+                            filePath: filePath,
+                            fileSize: stats.size,
+                            method: 'PowerShell'
+                        });
+                    } else {
+                        resolve({
+                            success: false,
+                            error: 'Downloaded file is empty',
+                            filePath: filePath
+                        });
+                    }
+                } else {
+                    resolve({
+                        success: false,
+                        error: 'File not found after download',
+                        stderr: stderr
+                    });
+                }
+            });
+        });
+    }
+    
+    // Linux/macOS wget或curl下载
+    async downloadWithWgetOrCurl(downloadUrl, filePath, system) {
+        return new Promise((resolve) => {
+            let command;
+            
+            // 优先使用wget，如果不存在则使用curl
+            if (system.downloadCommand === 'wget') {
+                command = `wget --user-agent='${system.userAgent}' --timeout=60 --tries=3 --continue -O '${filePath}' '${downloadUrl}'`;
+            } else {
+                command = `curl -L --user-agent '${system.userAgent}' --connect-timeout 60 --max-time 300 -o '${filePath}' '${downloadUrl}'`;
+            }
+            
+            console.error(`[${system.downloadCommand}] Executing: ${command}`);
+            
+            exec(command, (error, stdout, stderr) => {
+                if (error) {
+                    console.error(`[${system.downloadCommand}] Error: ${error.message}`);
+                    resolve({
+                        success: false,
+                        error: error.message,
+                        stderr: stderr
+                    });
+                    return;
+                }
+                
+                // 检查文件是否下载成功
+                if (fs.existsSync(filePath)) {
+                    const stats = fs.statSync(filePath);
+                    if (stats.size > 0) {
+                        resolve({
+                            success: true,
+                            filePath: filePath,
+                            fileSize: stats.size,
+                            method: system.downloadCommand
+                        });
+                    } else {
+                        resolve({
+                            success: false,
+                            error: 'Downloaded file is empty',
+                            filePath: filePath
+                        });
+                    }
+                } else {
+                    resolve({
+                        success: false,
+                        error: 'File not found after download',
+                        stderr: stderr
+                    });
+                }
+            });
+        });
+    }
+    
+    // 批量后台下载
+    async batchDownloadPDFs(downloadList) {
+        const system = this.detectSystemEnvironment();
+        const results = [];
+        
+        console.error(`[BatchDownload] Starting batch download for ${downloadList.length} papers on ${system.platform}`);
+        
+        for (let i = 0; i < downloadList.length; i++) {
+            const item = downloadList[i];
+            console.error(`[BatchDownload] Processing ${i + 1}/${downloadList.length}: ${item.pmid}`);
+            
+            try {
+                // 模拟人类操作间隔（1-3秒随机延迟）
+                const delay = Math.random() * 2000 + 1000;
+                await new Promise(resolve => setTimeout(resolve, delay));
+                
+                const result = await this.smartDownloadPDF(item.pmid, item.downloadUrl, item.oaInfo);
+                results.push({
+                    pmid: item.pmid,
+                    title: item.title,
+                    result: result
+                });
+                
+                // 下载间隔（避免过于频繁的请求）
+                if (i < downloadList.length - 1) {
+                    const interval = Math.random() * 3000 + 2000; // 2-5秒间隔
+                    console.error(`[BatchDownload] Waiting ${Math.round(interval/1000)}s before next download...`);
+                    await new Promise(resolve => setTimeout(resolve, interval));
+                }
+                
+            } catch (error) {
+                console.error(`[BatchDownload] Error processing ${item.pmid}:`, error.message);
+                results.push({
+                    pmid: item.pmid,
+                    title: item.title,
+                    result: {
+                        success: false,
+                        error: error.message
+                    }
+                });
+            }
+        }
+        
+        return results;
+    }
+    
+    // 检查下载工具可用性
+    async checkDownloadTools() {
+        const system = this.detectSystemEnvironment();
+        const tools = [];
+        
+        if (system.isWindows) {
+            // 检查PowerShell
+            try {
+                await new Promise((resolve, reject) => {
+                    exec('powershell -Command "Get-Host"', (error) => {
+                        if (error) reject(error);
+                        else resolve();
+                    });
+                });
+                tools.push({ name: 'PowerShell', available: true });
+            } catch (error) {
+                tools.push({ name: 'PowerShell', available: false, error: error.message });
+            }
+        } else {
+            // 检查wget
+            try {
+                await new Promise((resolve, reject) => {
+                    exec('wget --version', (error) => {
+                        if (error) reject(error);
+                        else resolve();
+                    });
+                });
+                tools.push({ name: 'wget', available: true });
+            } catch (error) {
+                tools.push({ name: 'wget', available: false, error: error.message });
+            }
+            
+            // 检查curl
+            try {
+                await new Promise((resolve, reject) => {
+                    exec('curl --version', (error) => {
+                        if (error) reject(error);
+                        else resolve();
+                    });
+                });
+                tools.push({ name: 'curl', available: true });
+            } catch (error) {
+                tools.push({ name: 'curl', available: false, error: error.message });
+            }
+        }
+        
+        return {
+            system: system,
+            tools: tools,
+            recommended: system.downloadCommand
+        };
+    }
+
     async run() {
         const transport = new StdioServerTransport();
         await this.server.connect(transport);
         console.error("PubMed Data Server v2.0 running on stdio");
         console.error(`[AbstractMode] ${ABSTRACT_MODE} (max_chars=${ABSTRACT_MAX_CHARS}) - ${ABSTRACT_MODE_NOTE}`);
+        if (FULLTEXT_ENABLED) {
+            console.error(`[FullTextMode] ${FULLTEXT_MODE} - ${FULLTEXT_AUTO_DOWNLOAD ? 'Auto-download enabled' : 'Manual download only'}`);
+        }
     }
 }
 
