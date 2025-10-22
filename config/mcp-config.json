@@ -3,7 +3,7 @@
   "mcpServers": {
     "pubmed-data-server": {
       "disabled": false,
-      "timeout": 180,
+      "timeout": 300,
       "type": "stdio",
       "command": "node",
       "args": [
