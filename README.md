@@ -47,6 +47,12 @@
 - **自动导出**：查询结果自动生成引用文件
 - **批量处理**：支持大量文献的批量导出
 
+### 🌐 **代理支持** - 网络环境适配
+- **HTTP/HTTPS代理**：支持企业网络和防火墙环境
+- **认证代理**：支持用户名密码认证的代理服务器
+- **自动检测**：智能识别代理配置，无缝切换
+- **故障恢复**：代理失败时自动降级到直连模式
+
 ---
 
 ## 🎯 核心理念
@@ -121,6 +127,12 @@ FULLTEXT_MODE=disabled
 # enabled：自动导出RIS和BibTeX格式（默认）
 # disabled：禁用EndNote导出
 ENDNOTE_EXPORT=enabled
+# 代理配置（可选）
+# HTTP代理：用于HTTP和HTTPS请求
+HTTP_PROXY=http://proxy.example.com:8080
+# HTTPS代理：专门用于HTTPS请求
+HTTPS_PROXY=https://proxy.example.com:8080
+# 支持认证代理：http://username:password@proxy.example.com:8080
 ```
 
 ### 步骤五：MCP客户端配置
@@ -416,6 +428,12 @@ mcp-pubmed-server/
    - 不要使用 `cwd` 参数
    - 使用正斜杠 `/` 或双反斜杠 `\\`
 
+5. **代理连接问题**
+   - 检查代理服务器地址和端口是否正确
+   - 确认代理服务器支持HTTPS连接
+   - 验证代理认证信息（如需要）
+   - 格式：`http://username:password@proxy.example.com:8080`
+
 ### 部署清单
 - [ ] Node.js已安装
 - [ ] 依赖已安装 (`npm install`)
@@ -437,6 +455,20 @@ Apache License 2.0
 - **[EndNote导出功能使用指南](docs/ENDNOTE_EXPORT.md)** - EndNote兼容格式自动导出功能
 - **[配置说明文档](docs/CONFIGURATION.md)** - 环境变量和MCP客户端配置指南
 - **[项目结构说明](.cursor/rules/README.md)** - Cursor规则和项目架构说明
+
+## 🧪 测试工具
+
+### 代理功能测试
+```bash
+# 测试代理配置和连接
+node test-proxy.js
+```
+
+该脚本会：
+- 检查代理环境变量配置
+- 测试代理连接是否正常
+- 验证PubMed API是否可通过代理访问
+- 提供详细的配置指导
 
 ---
 

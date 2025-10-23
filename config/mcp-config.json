@@ -15,7 +15,9 @@
         "PUBMED_EMAIL": "your_email@example.com",
         "ABSTRACT_MODE": "deep",
         "FULLTEXT_MODE": "enabled",
-        "ENDNOTE_EXPORT": "enabled"
+        "ENDNOTE_EXPORT": "enabled",
+        "HTTP_PROXY": "http://proxy.example.com:8080",
+        "HTTPS_PROXY": "https://proxy.example.com:8080"
       }
     }
   }
