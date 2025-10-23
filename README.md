@@ -48,10 +48,12 @@
 - **批量处理**：支持大量文献的批量导出
 
 ### 🌐 **代理支持** - 网络环境适配
+- **代理开关控制**：通过 `PROXY_ENABLED` 环境变量控制代理功能
 - **HTTP/HTTPS代理**：支持企业网络和防火墙环境
 - **认证代理**：支持用户名密码认证的代理服务器
 - **自动检测**：智能识别代理配置，无缝切换
 - **故障恢复**：代理失败时自动降级到直连模式
+- **超时重试**：可配置代理超时时间和重试次数
 
 ---
 
@@ -128,11 +130,20 @@ FULLTEXT_MODE=disabled
 # disabled：禁用EndNote导出
 ENDNOTE_EXPORT=enabled
 # 代理配置（可选）
+# 代理开关：enabled | disabled
+PROXY_ENABLED=disabled
 # HTTP代理：用于HTTP和HTTPS请求
 HTTP_PROXY=http://proxy.example.com:8080
 # HTTPS代理：专门用于HTTPS请求
 HTTPS_PROXY=https://proxy.example.com:8080
 # 支持认证代理：http://username:password@proxy.example.com:8080
+# 代理认证（可选）
+PROXY_USERNAME=
+PROXY_PASSWORD=
+# 代理超时设置（秒）
+PROXY_TIMEOUT=30
+# 代理重试次数
+PROXY_RETRY_COUNT=3
 ```
 
 ### 步骤五：MCP客户端配置
@@ -149,7 +160,10 @@ HTTPS_PROXY=https://proxy.example.com:8080
         "PUBMED_API_KEY": "你的API密钥",
         "PUBMED_EMAIL": "你的邮箱地址",
         "ABSTRACT_MODE": "deep",
-        "FULLTEXT_MODE": "enabled"
+        "FULLTEXT_MODE": "enabled",
+        "PROXY_ENABLED": "disabled",
+        "HTTP_PROXY": "",
+        "HTTPS_PROXY": ""
       }
     }
   }
@@ -176,7 +190,10 @@ HTTPS_PROXY=https://proxy.example.com:8080
         "PUBMED_API_KEY": "你的API密钥",
         "PUBMED_EMAIL": "你的邮箱地址",
         "ABSTRACT_MODE": "deep",
-        "FULLTEXT_MODE": "enabled"
+        "FULLTEXT_MODE": "enabled",
+        "PROXY_ENABLED": "disabled",
+        "HTTP_PROXY": "",
+        "HTTPS_PROXY": ""
       }
     }
   }
@@ -203,7 +220,10 @@ HTTPS_PROXY=https://proxy.example.com:8080
         "PUBMED_API_KEY": "你的API密钥",
         "PUBMED_EMAIL": "你的邮箱地址",
         "ABSTRACT_MODE": "deep",
-        "FULLTEXT_MODE": "enabled"
+        "FULLTEXT_MODE": "enabled",
+        "PROXY_ENABLED": "disabled",
+        "HTTP_PROXY": "",
+        "HTTPS_PROXY": ""
       }
     }
   }
@@ -230,7 +250,10 @@ cp config/claude_desktop_config.json.example config/claude_desktop_config.json
         "PUBMED_API_KEY": "你的API密钥",
         "PUBMED_EMAIL": "你的邮箱地址",
         "ABSTRACT_MODE": "deep",
-        "FULLTEXT_MODE": "enabled"
+        "FULLTEXT_MODE": "enabled",
+        "PROXY_ENABLED": "disabled",
+        "HTTP_PROXY": "",
+        "HTTPS_PROXY": ""
       }
     }
   }
@@ -429,10 +452,13 @@ mcp-pubmed-server/
    - 使用正斜杠 `/` 或双反斜杠 `\\`
 
 5. **代理连接问题**
+   - 检查 `PROXY_ENABLED` 是否设置为 `enabled`
    - 检查代理服务器地址和端口是否正确
    - 确认代理服务器支持HTTPS连接
    - 验证代理认证信息（如需要）
    - 格式：`http://username:password@proxy.example.com:8080`
+   - 检查代理超时设置是否合理（默认30秒）
+   - 确认代理重试次数设置（默认3次）
 
 ### 部署清单
 - [ ] Node.js已安装
