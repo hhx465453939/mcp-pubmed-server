@@ -9,6 +9,8 @@ import fs from 'fs';
 import path from 'path';
 import { spawn, exec } from 'child_process';
 import os from 'os';
+import { HttpsProxyAgent } from 'https-proxy-agent';
+import { HttpProxyAgent } from 'http-proxy-agent';
 
 const PUBMED_BASE_URL = 'https://eutils.ncbi.nlm.nih.gov/entrez/eutils';
 const RATE_LIMIT_DELAY = 334; // PubMed rate limit: 3 requests per second
@@ -42,6 +44,10 @@ const ENDNOTE_EXPORT_ENABLED = (process.env.ENDNOTE_EXPORT || 'enabled').toLower
 const ENDNOTE_CACHE_DIR = path.join(CACHE_DIR, 'endnote');
 const ENDNOTE_EXPORT_FORMATS = ['ris', 'bibtex']; // 支持的导出格式
 
+// 代理配置
+const PROXY_URL = process.env.HTTP_PROXY || process.env.HTTPS_PROXY || process.env.http_proxy || process.env.https_proxy;
+const PROXY_ENABLED = !!PROXY_URL;
+
 // OA detection URLs
 const PMC_BASE_URL = 'https://www.ncbi.nlm.nih.gov/pmc';
 const PMC_API_URL = 'https://www.ncbi.nlm.nih.gov/pmc/oai/oai.cgi';
@@ -64,6 +70,32 @@ class PubMedDataServer {
         this.setupRequestHandlers();
         this.lastRequestTime = 0;
         this.cache = new Map(); // 简单的内存缓存
+        
+        // 初始化代理Agent
+        this.proxyAgent = null;
+        this.httpProxyAgent = null;
+        if (PROXY_ENABLED) {
+            try {
+                // 为HTTPS请求创建HttpsProxyAgent
+                if (PROXY_URL.startsWith('https://')) {
+                    this.proxyAgent = new HttpsProxyAgent(PROXY_URL);
+                } else if (PROXY_URL.startsWith('http://')) {
+                    this.proxyAgent = new HttpsProxyAgent(PROXY_URL); // 使用HttpsProxyAgent处理HTTPS请求
+                    this.httpProxyAgent = new HttpProxyAgent(PROXY_URL); // 备用HTTP代理
+                } else {
+                    // 如果没有协议前缀，默认使用http
+                    this.proxyAgent = new HttpsProxyAgent(`http://${PROXY_URL}`);
+                    this.httpProxyAgent = new HttpProxyAgent(`http://${PROXY_URL}`);
+                }
+                console.error(`[Proxy] 代理已启用: ${PROXY_URL}`);
+            } catch (error) {
+                console.error(`[Proxy] 代理配置错误: ${error.message}`);
+                this.proxyAgent = null;
+                this.httpProxyAgent = null;
+            }
+        } else {
+            console.error(`[Proxy] 代理未配置，使用直连`);
+        }
         this.cacheTimeout = 5 * 60 * 1000; // 5分钟缓存过期
         this.maxCacheSize = 100; // 最大缓存条目数
         this.cacheStats = {
@@ -656,6 +688,28 @@ class PubMedDataServer {
         this.lastRequestTime = Date.now();
     }
 
+    // 支持代理的fetch方法
+    async fetchWithProxy(url, options = {}) {
+        const fetchOptions = {
+            timeout: REQUEST_TIMEOUT,
+            ...options
+        };
+
+        // 如果启用了代理，添加代理Agent
+        if (this.proxyAgent) {
+            // 根据URL协议选择代理Agent
+            if (url.startsWith('https://')) {
+                fetchOptions.agent = this.proxyAgent; // 使用HttpsProxyAgent
+            } else if (url.startsWith('http://') && this.httpProxyAgent) {
+                fetchOptions.agent = this.httpProxyAgent; // 使用HttpProxyAgent
+            } else {
+                fetchOptions.agent = this.proxyAgent; // 默认使用HttpsProxyAgent
+            }
+        }
+
+        return await fetch(url, fetchOptions);
+    }
+
     // 缓存管理
     getCacheKey(query, maxResults, daysBack, sortBy) {
         return `${query}|${maxResults}|${daysBack}|${sortBy}`;
@@ -792,10 +846,10 @@ class PubMedDataServer {
             searchUrl.searchParams.append('api_key', process.env.PUBMED_API_KEY);
         }
 
-        const response = await fetch(searchUrl.toString(), {
-            timeout: REQUEST_TIMEOUT
-        });
+        const response = await this.fetchWithProxy(searchUrl.toString());
         if (!response.ok) {
+            const errorText = await response.text();
+            console.error(`[PubMed API] Error: ${response.status} ${response.statusText} - ${errorText.substring(0, 200)}`);
             throw new Error(`PubMed search failed: ${response.statusText}`);
         }
 
@@ -860,9 +914,7 @@ class PubMedDataServer {
             summaryUrl.searchParams.append('api_key', process.env.PUBMED_API_KEY);
         }
 
-        const response = await fetch(summaryUrl.toString(), {
-            timeout: REQUEST_TIMEOUT
-        });
+        const response = await this.fetchWithProxy(summaryUrl.toString());
         if (!response.ok) {
             throw new Error(`Failed to fetch article details: ${response.statusText}`);
         }
@@ -922,9 +974,7 @@ class PubMedDataServer {
             abstractUrl.searchParams.append('api_key', process.env.PUBMED_API_KEY);
         }
 
-        const response = await fetch(abstractUrl.toString(), {
-            timeout: REQUEST_TIMEOUT
-        });
+        const response = await this.fetchWithProxy(abstractUrl.toString());
         if (!response.ok) {
             throw new Error(`Failed to fetch abstract: ${response.statusText}`);
         }
@@ -1122,7 +1172,20 @@ class PubMedDataServer {
         } catch (error) {
             const endTime = Date.now();
             console.error(`[PubMed Search] Error after ${endTime - startTime}ms:`, error.message);
-            throw error;
+            return {
+                content: [
+                    {
+                        type: "text",
+                        text: JSON.stringify({
+                            success: false,
+                            error: error.message,
+                            query: query,
+                            total: 0,
+                            articles: []
+                        }, null, 2)
+                    }
+                ]
+            };
         }
     }
 
@@ -1179,7 +1242,20 @@ class PubMedDataServer {
         } catch (error) {
             const endTime = Date.now();
             console.error(`[Quick Search] Error after ${endTime - startTime}ms:`, error.message);
-            throw error;
+            return {
+                content: [
+                    {
+                        type: "text",
+                        text: JSON.stringify({
+                            success: false,
+                            error: error.message,
+                            query: query,
+                            total: 0,
+                            articles: []
+                        }, null, 2)
+                    }
+                ]
+            };
         }
     }
 
@@ -2602,7 +2678,7 @@ class PubMedDataServer {
     async checkPMCContent(pmid) {
         try {
             const pmcUrl = `${PMC_BASE_URL}/?term=${pmid}`;
-            const response = await fetch(pmcUrl, { timeout: REQUEST_TIMEOUT });
+            const response = await this.fetchWithProxy(pmcUrl);
             
             if (response.ok) {
                 const html = await response.text();
@@ -2628,7 +2704,7 @@ class PubMedDataServer {
     async checkUnpaywall(doi) {
         try {
             const unpaywallUrl = `${UNPAYWALL_API_URL}/${doi}?email=${process.env.PUBMED_EMAIL || 'user@example.com'}`;
-            const response = await fetch(unpaywallUrl, { timeout: REQUEST_TIMEOUT });
+            const response = await this.fetchWithProxy(unpaywallUrl);
             
             if (response.ok) {
                 const data = await response.json();
@@ -2651,8 +2727,7 @@ class PubMedDataServer {
     async checkPublisherOA(doi) {
         try {
             const doiUrl = `https://doi.org/${doi}`;
-            const response = await fetch(doiUrl, { 
-                timeout: REQUEST_TIMEOUT,
+            const response = await this.fetchWithProxy(doiUrl, {
                 headers: {
                     'User-Agent': 'Mozilla/5.0 (compatible; PubMed-MCP-Server/2.0)'
                 }
@@ -2681,8 +2756,7 @@ class PubMedDataServer {
         try {
             console.error(`[FullText] Downloading PDF for ${pmid} from ${oaInfo.sources.join(', ')}`);
             
-            const response = await fetch(downloadUrl, {
-                timeout: 60000, // 60秒超时
+            const response = await this.fetchWithProxy(downloadUrl, {
                 headers: {
                     'User-Agent': 'Mozilla/5.0 (compatible; PubMed-MCP-Server/2.0)',
                     'Accept': 'application/pdf,text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'

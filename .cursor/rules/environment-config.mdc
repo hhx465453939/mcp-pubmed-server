@@ -16,6 +16,16 @@ ABSTRACT_MODE=quick  # 或 deep
 FULLTEXT_MODE=disabled  # disabled, enabled, auto
 ```
 
+### 代理配置环境变量
+```bash
+# 代理配置（可选）
+HTTP_PROXY=http://proxy.example.com:8080
+HTTPS_PROXY=https://proxy.example.com:8080
+# 或者使用小写（兼容性）
+http_proxy=http://proxy.example.com:8080
+https_proxy=https://proxy.example.com:8080
+```
+
 ### 环境变量说明
 - `PUBMED_API_KEY`: NCBI API密钥，从 [NCBI API Key Management](https://www.ncbi.nlm.nih.gov/account/settings/) 获取
 - `PUBMED_EMAIL`: 邮箱地址，用于PubMed API调用标识
@@ -26,6 +36,11 @@ FULLTEXT_MODE=disabled  # disabled, enabled, auto
   - `disabled`: 禁用全文功能（默认）
   - `enabled`: 启用全文检测，手动下载
   - `auto`: 启用全文检测，自动下载可用的OA论文
+- `HTTP_PROXY` / `HTTPS_PROXY`: 代理服务器地址
+  - 支持HTTP和HTTPS代理
+  - 格式：`http://proxy.example.com:8080`
+  - 如果不指定协议，默认使用HTTP
+  - 支持认证：`http://username:password@proxy.example.com:8080`
 
 ## MCP客户端配置
 
@@ -41,7 +56,9 @@ FULLTEXT_MODE=disabled  # disabled, enabled, auto
         "PUBMED_API_KEY": "你的API密钥",
         "PUBMED_EMAIL": "你的邮箱地址",
         "ABSTRACT_MODE": "deep",
-        "FULLTEXT_MODE": "enabled"
+        "FULLTEXT_MODE": "enabled",
+        "HTTP_PROXY": "http://proxy.example.com:8080",
+        "HTTPS_PROXY": "https://proxy.example.com:8080"
       }
     }
   }
@@ -62,7 +79,9 @@ FULLTEXT_MODE=disabled  # disabled, enabled, auto
         "PUBMED_API_KEY": "你的API密钥",
         "PUBMED_EMAIL": "你的邮箱地址",
         "ABSTRACT_MODE": "deep",
-        "FULLTEXT_MODE": "enabled"
+        "FULLTEXT_MODE": "enabled",
+        "HTTP_PROXY": "http://proxy.example.com:8080",
+        "HTTPS_PROXY": "https://proxy.example.com:8080"
       }
     }
   }
@@ -81,7 +100,9 @@ FULLTEXT_MODE=disabled  # disabled, enabled, auto
         "PUBMED_API_KEY": "你的API密钥",
         "PUBMED_EMAIL": "你的邮箱地址",
         "ABSTRACT_MODE": "deep",
-        "FULLTEXT_MODE": "enabled"
+        "FULLTEXT_MODE": "enabled",
+        "HTTP_PROXY": "http://proxy.example.com:8080",
+        "HTTPS_PROXY": "https://proxy.example.com:8080"
       }
     }
   }
@@ -159,6 +180,22 @@ const REQUEST_TIMEOUT = 30000; // 30秒请求超时
 ### 网络配置
 - 确保防火墙允许HTTPS连接到PubMed API
 - 配置代理服务器（如需要）
+
+#### 代理配置故障排除
+1. **代理连接失败**
+   - 检查代理服务器地址和端口是否正确
+   - 确认代理服务器支持HTTPS连接
+   - 验证代理认证信息（如需要）
+
+2. **代理认证问题**
+   - 确保用户名和密码正确
+   - 检查特殊字符是否需要URL编码
+   - 格式：`http://username:password@proxy.example.com:8080`
+
+3. **代理协议问题**
+   - HTTPS请求建议使用HTTPS代理
+   - HTTP代理也可以处理HTTPS请求（CONNECT方法）
+   - 如果不确定，先尝试HTTP代理
 
 ## 监控和日志
 
